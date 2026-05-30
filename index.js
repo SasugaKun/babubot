@@ -18,9 +18,10 @@ export default {
 
     try {
       const body = await request.json();
-      const message = body.message || "";
+      const message = String(body.message || "").trim();
+      const userId = sanitizeUserId(body.userId || "default");
 
-      if (!message.trim()) {
+      if (!message) {
         return jsonResponse(
           {
             error: "Pesan kosong."
@@ -39,9 +40,20 @@ export default {
       }
 
       const model = env.GEMINI_MODEL || "gemini-3.0-flash";
+      const memoryKey = `babubot:memory:${userId}`;
+
+      let memory = [];
+      if (env.BABUBOT_KV) {
+        memory = await loadMemory(env, memoryKey);
+      }
+
+      const memoryText = buildMemoryText(memory);
 
       const prompt = `
-Kamu adalah Babubot, asisten AI yang menjawab dalam bahasa Indonesia.
+Kamu adalah BabuBot, asisten AI yang menjawab dalam bahasa Indonesia.
+
+Memori percakapan yang relevan:
+${memoryText}
 
 Gaya jawaban:
 - Jelas
@@ -51,6 +63,7 @@ Gaya jawaban:
 - Jangan terlalu banyak basa-basi
 - Jika user bertanya teknis, jawab bertahap dan mudah diikuti
 - Mampu mengirim informasi yang kredibel
+- Jika mengirim kode pemrograman, gunakan blok kode markdown dengan triple backtick
 
 Pesan user:
 ${message}
@@ -76,9 +89,9 @@ ${message}
 
       const geminiUrl =
         "https://generativelanguage.googleapis.com/v1beta/models/" +
-        model +
+        encodeURIComponent(model) +
         ":generateContent?key=" +
-        env.GEMINI_API_KEY;
+        encodeURIComponent(env.GEMINI_API_KEY);
 
       const geminiRes = await fetch(geminiUrl, {
         method: "POST",
@@ -103,6 +116,11 @@ ${message}
 
       const text = extractText(geminiData);
 
+      if (env.BABUBOT_KV) {
+        const updatedMemory = updateMemory(memory, message, text);
+        await env.BABUBOT_KV.put(memoryKey, JSON.stringify(updatedMemory));
+      }
+
       return jsonResponse({
         ok: true,
         model,
@@ -118,6 +136,57 @@ ${message}
     }
   }
 };
+
+function sanitizeUserId(userId) {
+  return (
+    String(userId || "default")
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, "")
+      .slice(0, 80) || "default"
+  );
+}
+
+async function loadMemory(env, memoryKey) {
+  try {
+    const savedMemory = await env.BABUBOT_KV.get(memoryKey);
+    const parsed = savedMemory ? JSON.parse(savedMemory) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function buildMemoryText(memory) {
+  if (!Array.isArray(memory) || memory.length === 0) {
+    return "Belum ada memori.";
+  }
+
+  return memory
+    .slice(-10)
+    .map((item, index) => {
+      const user = item.user ? `User: ${item.user}` : "";
+      const ai = item.ai ? `BabuBot: ${item.ai}` : "";
+      return `${index + 1}. ${[user, ai].filter(Boolean).join(" | ")}`;
+    })
+    .join("\n");
+}
+
+function updateMemory(memory, userMessage, aiReply) {
+  const nextMemory = Array.isArray(memory) ? [...memory] : [];
+
+  nextMemory.push({
+    user: limitText(userMessage, 700),
+    ai: limitText(aiReply, 900),
+    time: new Date().toISOString()
+  });
+
+  return nextMemory.slice(-20);
+}
+
+function limitText(text, maxLength) {
+  const value = String(text || "").trim();
+  return value.length > maxLength ? value.slice(0, maxLength) + "..." : value;
+}
 
 function extractText(data) {
   const parts = data?.candidates?.[0]?.content?.parts || [];
@@ -147,4 +216,4 @@ function corsHeaders() {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type"
   };
-  }
+}
