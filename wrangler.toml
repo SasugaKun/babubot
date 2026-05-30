@@ -3,4 +3,4 @@ main = "index.js"
 compatibility_date = "2025-05-20"
 
 [vars]
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-flash"
